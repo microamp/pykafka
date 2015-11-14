@@ -49,7 +49,6 @@ class RdKafkaSimpleConsumer(SimpleConsumer):
                          if k not in ("self", "__class__")}
         self._rdk_consumer = None
         self._poller_thread = None
-        self._stop_poller_thread = cluster.handler.Event()
         # super() must come last for the case where auto_start=True
         super(RdKafkaSimpleConsumer, self).__init__(**callargs)
 
@@ -76,14 +75,16 @@ class RdKafkaSimpleConsumer(SimpleConsumer):
         # Poll: for a consumer, the main reason to poll the handle is that
         # this de-queues log messages at error level that might otherwise be
         # held up in librdkafka
-        def poll(rdk_handle, stop_event):
-            while not stop_event.is_set():
-                rdk_handle.poll(timeout_ms=1000)
-            log.debug("Exiting RdKafkaSimpleConsumer poller thread.")
+        def poll(rdk_handle):
+            while True:
+                try:
+                    rdk_handle.poll(timeout_ms=1000)
+                except RdKafkaStoppedException:
+                    break
+            log.debug("Exiting RdKafkaSimpleConsumer poller thread cleanly.")
 
-        self._stop_poller_thread.clear()
         self._poller_thread = self._cluster.handler.spawn(
-            poll, args=(self._rdk_consumer, self._stop_poller_thread))
+            poll, kwargs=dict(rdk_handle=self._rdk_consumer))
 
     def consume(self, block=True):
         timeout_ms = self._consumer_timeout_ms if block else 1
@@ -130,7 +131,6 @@ class RdKafkaSimpleConsumer(SimpleConsumer):
         # shipping all important state (ie stored offsets) out
         ret = super(RdKafkaSimpleConsumer, self).stop()
         if self._rdk_consumer is not None:
-            self._stop_poller_thread.set()
             # Call _rd_kafka.Consumer.stop explicitly, so we may catch errors:
             self._rdk_consumer.stop()
             log.debug("Issued stop to _rdk_consumer.")
